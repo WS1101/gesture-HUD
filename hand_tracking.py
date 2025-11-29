@@ -29,6 +29,9 @@ mp_drawing = mp.solutions.drawing_utils
 
 cap = cv2.VideoCapture(1)
 
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
 
 # --- Gesture recognization function ---
 def get_distance(p1, p2):
@@ -70,7 +73,7 @@ def recognize_single_hand_gesture(landmarks_of_interest, pinch_thresh, zoom_thre
     if any(d is None for d in dist):
         return "none"
 
-    if (dist_4_8 < pinch_thresh) and (dist_8_12 > thresh):
+    if (dist_4_8 < pinch_thresh) and (dist_8_12 > pinch_THRESHOLD):
         return "pinch"
 
     if (dist_16_20 < zoom_thresh) and (dist_8_12 < thresh) and (dist_12_16 > thresh):
@@ -103,11 +106,11 @@ with mp_hands.Hands(
         min_tracking_confidence=0.7
 ) as hands:
     THRESHOLD = 0.1
-    pinch_THRESHOLD = 0.06
+    pinch_THRESHOLD = 0.045
     ZOOM_THRESHOLD = 0.1
 
     last_send_time = 0
-    THROTTLE_INTERVAL = 0.05
+    THROTTLE_INTERVAL = 0.016
 
     current_gesture_state = "none"
     gesturekey = ""
@@ -191,11 +194,13 @@ with mp_hands.Hands(
                             action_payload["y"] = current_pinch_pos["y"]
 
                         current_gesture_state = gesturekey
+                    else:
+                        gesture = "none"
+                        action_payload["action"] = "none"
 
 
 
 
-                all_hands_data.append({"landmarks": landmarks_of_interest})
                 mp_drawing.draw_landmarks(
                     frame,
                     hand_landmarks,
@@ -206,7 +211,6 @@ with mp_hands.Hands(
                 action_payload["action"] = current_global_action
                 gesturekey = current_global_action
 
-            action_payload["hands"] = all_hands_data
             if current_global_action == "none":
                 action_payload["action"] = current_gesture_state
 
@@ -239,8 +243,8 @@ with mp_hands.Hands(
             if current_gesture_state != "none":
                 print("---All gestures done! (No hands)---")
 
-            current_global_action = "none"
-            current_gesture_state = "none"
+                current_global_action = "none"
+                current_gesture_state = "none"
 
             json_data = json.dumps({"none": {"action": "none"}})
             if not safe_send(ws, json_data):
