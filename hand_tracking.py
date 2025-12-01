@@ -7,6 +7,7 @@ import websocket
 import time
 from mediapipe.tasks.python.components.containers.landmark import Landmark
 
+
 def connect_websocket():
     while True:
         try:
@@ -21,8 +22,8 @@ def connect_websocket():
             print(f"✗ Connection error: {e}. Retrying in 2 seconds...")
             time.sleep(2)
 
-ws = connect_websocket()
 
+ws = connect_websocket()
 
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
@@ -56,7 +57,37 @@ def extract_landmarks(hand_landmarks, ids_to_extract):
     return landmarks_of_interest
 
 
-def recognize_single_hand_gesture(landmarks_of_interest, pinch_thresh, zoom_thresh, thresh):
+# 개선된 손 크기 계산: 손목에서 각 손가락 끝까지 평균 거리
+def get_hand_size(landmarks_of_interest):
+    pos0 = landmarks_of_interest.get("0")  # 손목
+    finger_tips = ["8", "12", "16", "20"]  # 검지, 중지, 약지, 새끼 끝
+
+    if pos0 is None:
+        return None
+
+    distances = []
+    for tip_id in finger_tips:
+        tip_pos = landmarks_of_interest.get(tip_id)
+        if tip_pos:
+            dist = get_dict_distance(pos0, tip_pos)
+            if dist is not None:
+                distances.append(dist)
+
+    if len(distances) == 0:
+        return None
+
+    # 평균 거리 사용 (더 안정적)
+    avg_distance = sum(distances) / len(distances)
+    return avg_distance
+
+
+def recognize_single_hand_gesture(landmarks_of_interest, pinch_low, pinch_high, zoom_threshold,
+                                  pointer_ratio, previous_gesture):
+    # 손 크기 기준값 계산
+    hand_size = get_hand_size(landmarks_of_interest)
+    if hand_size is None or hand_size < 0.01:  # 너무 작으면 무시
+        return "none"
+
     pos4 = landmarks_of_interest.get("4")
     pos8 = landmarks_of_interest.get("8")
     pos12 = landmarks_of_interest.get("12")
@@ -73,13 +104,32 @@ def recognize_single_hand_gesture(landmarks_of_interest, pinch_thresh, zoom_thre
     if any(d is None for d in dist):
         return "none"
 
-    if (dist_4_8 < pinch_thresh) and (dist_8_12 > pinch_THRESHOLD):
+    # 비율로 변환 (거리 / 손 크기) - 정규화
+    ratio_4_8 = dist_4_8 / hand_size
+    ratio_8_12 = dist_8_12 / hand_size
+    ratio_12_16 = dist_12_16 / hand_size
+    ratio_16_20 = dist_16_20 / hand_size
+
+    # 디버깅용 출력
+    print(f"Ratios - 4_8: {ratio_4_8:.3f}, 8_12: {ratio_8_12:.3f}")
+
+    # 히스테리시스를 적용한 핀치 제스처 판단
+    if previous_gesture == "pinch" or previous_gesture == "left_pinch":
+        # 이미 핀치 상태 → 더 큰 값에서만 해제 (pinch_high)
+        is_pinch = (ratio_4_8 < pinch_high) and (ratio_8_12 > pinch_low * 2.0)
+    else:
+        # 핀치 아닌 상태 → 더 작은 값에서만 진입 (pinch_low)
+        is_pinch = (ratio_4_8 < pinch_low) and (ratio_8_12 > pinch_low * 2.0)
+
+    if is_pinch:
         return "pinch"
 
-    if (dist_16_20 < zoom_thresh) and (dist_8_12 < thresh) and (dist_12_16 > thresh):
+    # 핀치 줌 제스처 (히스테리시스 없이 단순하게)
+    if (ratio_16_20 < zoom_threshold) and (ratio_8_12 < pointer_ratio) and (ratio_12_16 > pointer_ratio * 1.2):
         return "pinch_zoom"
 
     return "pointer"
+
 
 # --- function End ---
 
@@ -97,24 +147,24 @@ def safe_send(ws_connection, data):
         return False
 
 
-
-
 with mp_hands.Hands(
         static_image_mode=False,
         max_num_hands=2,
         min_detection_confidence=0.7,
         min_tracking_confidence=0.7
 ) as hands:
-    THRESHOLD = 0.1
-    pinch_THRESHOLD = 0.045
-    ZOOM_THRESHOLD = 0.1
+    # 비율 기반 임계값 (정규화된 값)
+    PINCH_LOW = 0.25  # 핀치 진입: 손 크기의 25% 이하
+    PINCH_HIGH = 0.50  # 핀치 해제: 손 크기의 50% 이상
+    ZOOM_THRESHOLD = 0.22  # 줌: 손 크기의 22% 이하
+    POINTER_RATIO = 0.30  # 포인터 판단용
 
     last_send_time = 0
     THROTTLE_INTERVAL = 0.016
 
     current_gesture_state = "none"
+    previous_gesture = "none"
     gesturekey = ""
-
 
     while cap.isOpened():
         current_time = time.time()
@@ -135,9 +185,7 @@ with mp_hands.Hands(
 
         if result.multi_hand_landmarks:
             all_hands_data = []
-            tip_ids = [4, 8, 12, 16, 20]
-
-
+            tip_ids = [0, 4, 8, 12, 16, 20]  # 0번(손목) 추가
 
             for hand_landmarks, handedness in zip(result.multi_hand_landmarks, result.multi_handedness):
                 hand_label = handedness.classification[0].label
@@ -146,60 +194,57 @@ with mp_hands.Hands(
                 gesture = "none"
 
                 if hand_label == "Right":
-
-
-                    gesture = recognize_single_hand_gesture(landmarks_of_interest, pinch_THRESHOLD, ZOOM_THRESHOLD,
-                                                            THRESHOLD)
-                    action_payload["action"] = gesture
+                    gesture = recognize_single_hand_gesture(landmarks_of_interest, PINCH_LOW, PINCH_HIGH,
+                                                            ZOOM_THRESHOLD, POINTER_RATIO, previous_gesture)
 
                     if gesture == "pinch_zoom":
                         current_dist = get_dict_distance(landmarks_of_interest.get("4"),
                                                          landmarks_of_interest.get("8"))
                         zoom_center = landmarks_of_interest.get("4")
 
+                        action_payload["action"] = "pinch_zoom"
                         action_payload["current_dist"] = current_dist if current_dist is not None else 0.0
                         action_payload["x"] = zoom_center["x"] if zoom_center else 0.0
                         action_payload["y"] = zoom_center["y"] if zoom_center else 0.0
 
                     elif gesture == "pinch":
                         current_pinch_pos = landmarks_of_interest.get("4")
+                        action_payload["action"] = "pinch"
                         if current_pinch_pos:
                             action_payload["x"] = current_pinch_pos["x"]
                             action_payload["y"] = current_pinch_pos["y"]
 
                     elif gesture == "pointer":
                         pointer_pos = landmarks_of_interest.get("8")
+                        action_payload["action"] = "pointer"
                         if pointer_pos:
                             action_payload["x"] = pointer_pos["x"]
                             action_payload["y"] = pointer_pos["y"]
 
                     else:
-                        gesture = "none"
                         action_payload["action"] = "none"
 
                     current_gesture_state = gesture
                     current_global_action = gesture
 
                 elif hand_label == "Left" and current_global_action == "none":
-                    gesture = recognize_single_hand_gesture(landmarks_of_interest, pinch_THRESHOLD, ZOOM_THRESHOLD, THRESHOLD)
+                    gesture = recognize_single_hand_gesture(landmarks_of_interest, PINCH_LOW, PINCH_HIGH,
+                                                            ZOOM_THRESHOLD, POINTER_RATIO, previous_gesture)
 
                     if gesture == "pinch":
-
-                        gesturekey = "left_pinch"
-                        action_payload["action"] = "left_pinch"
-
                         current_pinch_pos = landmarks_of_interest.get("4")
+                        action_payload["action"] = "left_pinch"
                         if current_pinch_pos:
                             action_payload["x"] = current_pinch_pos["x"]
                             action_payload["y"] = current_pinch_pos["y"]
 
-                        current_gesture_state = gesturekey
+                        current_gesture_state = "left_pinch"
+                        current_global_action = "left_pinch"
                     else:
-                        gesture = "none"
+                        # 왼손이 pinch가 아니면 명확히 none
                         action_payload["action"] = "none"
-
-
-
+                        current_gesture_state = "none"
+                        current_global_action = "none"
 
                 mp_drawing.draw_landmarks(
                     frame,
@@ -207,20 +252,18 @@ with mp_hands.Hands(
                     mp_hands.HAND_CONNECTIONS
                 )
 
+            # 최종 제스처 키 결정
             if current_global_action != "none":
-                action_payload["action"] = current_global_action
                 gesturekey = current_global_action
+            else:
+                gesturekey = current_gesture_state
 
-            if current_global_action == "none":
-                action_payload["action"] = current_gesture_state
-
-            gesturekey = action_payload["action"]
-
+            # pinch_zoom이 아니면 current_dist 제거
             if gesturekey != "pinch_zoom":
                 if "current_dist" in action_payload:
                     del action_payload["current_dist"]
 
-
+            # 전송 로직 (이전 방식 복원)
             is_none_message = (gesturekey == "none")
 
             if is_none_message or (current_time - last_send_time) >= THROTTLE_INTERVAL:
@@ -236,15 +279,15 @@ with mp_hands.Hands(
 
                     print(json_data)
                     last_send_time = current_time
+                    previous_gesture = gesturekey
                     current_gesture_state = gesturekey
-
 
         else:
             if current_gesture_state != "none":
                 print("---All gestures done! (No hands)---")
-
                 current_global_action = "none"
                 current_gesture_state = "none"
+                previous_gesture = "none"
 
             json_data = json.dumps({"none": {"action": "none"}})
             if not safe_send(ws, json_data):
