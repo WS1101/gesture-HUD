@@ -293,25 +293,31 @@
 
 
     function handleZoom(delta, x, y) {
-        console.log(`[HTML] handleZoom: delta=${delta}, x=${x}, y=${y}`);
-
         const currentZoom = map.getZoom();
-        const zoomOptions = {
-            duration: 50,
-            bearing: map.getBearing()
-        };
+        const newZoom = Math.min(Math.max(currentZoom + delta, 0), 22);
 
+        if (currentZoom === newZoom) return;
 
-        if (currentZoom > 4.0) {
-            const screenX = x * window.innerWidth;
-            const screenY = y * window.innerHeight;
-            const point = map.unproject([screenX, screenY]);
+        // 1. 줌 변경 전 포인터 위치의 지리 좌표 구하기
+        const screenX = x * window.innerWidth;
+        const screenY = y * window.innerHeight;
+        const pointBefore = map.unproject([screenX, screenY]);
 
-            zoomOptions.around = point;
-        } else {
-        }
+        // 2. 줌 레벨만 변경 (지도 이동 없이)
+        map.setZoom(newZoom);
 
-        map.zoomTo(currentZoom + delta, zoomOptions);
+        // 3. 줌 변경 후 같은 화면 좌표의 지리 좌표 구하기
+        const pointAfter = map.unproject([screenX, screenY]);
+
+        // 4. 차이만큼 지도를 반대로 이동 (포인터 위치 고정 효과)
+        const lngDiff = pointAfter.lng - pointBefore.lng;
+        const latDiff = pointAfter.lat - pointBefore.lat;
+
+        const center = map.getCenter();
+        map.setCenter([
+            center.lng - lngDiff,
+            center.lat - latDiff
+        ]);
     }
 
     function handleClick() {
